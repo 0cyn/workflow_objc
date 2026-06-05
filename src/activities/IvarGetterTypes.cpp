@@ -1,4 +1,5 @@
 #include "../Metadata.h"
+#include "../Util.h"
 #include "../Workflow.h"
 
 #include <mediumlevelilinstruction.h>
@@ -13,6 +14,11 @@ namespace WorkflowObjC::Activities
 {
 	namespace
 	{
+		const std::vector<std::string_view> kObjCGetPropertyFunctions = {
+			"_objc_getProperty",
+			"j__objc_getProperty",
+		};
+
 		bool IsObjectiveCInstanceGetter(Function* func)
 		{
 			if (!func)
@@ -79,11 +85,131 @@ namespace WorkflowObjC::Activities
 
 		bool IsSelfVariable(Function* func, const SSAVariable& var)
 		{
-			auto params = func->GetParameterVariables();
-			if (params.IsUnknown() || params.GetValue().empty())
+			if (!func)
 				return false;
 
+			auto params = func->GetParameterVariables();
+			if (params.IsUnknown() || params.GetValue().empty())
+				return func->GetVariableNameOrDefault(var.var) == "self";
+
 			return var.var == params.GetValue().front();
+		}
+
+		std::optional<uint64_t> ConstantInteger(const MediumLevelILInstruction& expr)
+		{
+			switch (expr.operation)
+			{
+			case MLIL_CONST:
+				return static_cast<uint64_t>(expr.GetConstant<MLIL_CONST>());
+			case MLIL_CONST_PTR:
+				return static_cast<uint64_t>(expr.GetConstant<MLIL_CONST_PTR>());
+			default:
+				break;
+			}
+
+			auto value = expr.GetPossibleValues();
+			switch (value.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				return static_cast<uint64_t>(value.value);
+			default:
+				return std::nullopt;
+			}
+		}
+
+		Ref<Type> ResolveNamedType(BinaryView* view, Type* type)
+		{
+			if (!type || !type->IsNamedTypeRefer())
+				return type;
+
+			auto ref = type->GetNamedTypeReference();
+			if (!ref)
+				return type;
+
+			if (auto resolved = view->GetTypeByRef(ref))
+				return resolved;
+			if (auto resolved = view->GetTypeByName(ref->GetName()))
+				return resolved;
+			return type;
+		}
+
+		std::optional<Confidence<Ref<Type>>> MemberTypeAtOffset(BinaryView* view, Type* pointerType, uint64_t offset)
+		{
+			if (!view || !pointerType || !pointerType->IsPointer())
+				return std::nullopt;
+
+			auto child = pointerType->GetChildType();
+			if (child.IsUnknown() || !child.GetValue())
+				return std::nullopt;
+
+			auto pointee = ResolveNamedType(view, child.GetValue());
+			if (!pointee || !pointee->IsStructure())
+				return std::nullopt;
+
+			InheritedStructureMember inheritedMember;
+			if (pointee->GetStructure()->GetMemberIncludingInheritedAtOffset(view, static_cast<int64_t>(offset), inheritedMember) &&
+			    !inheritedMember.member.type.IsUnknown() && inheritedMember.member.type.GetValue())
+			{
+				return inheritedMember.member.type;
+			}
+
+			StructureMember member;
+			if (pointee->GetStructure()->GetMemberAtOffset(static_cast<int64_t>(offset), member) &&
+			    !member.type.IsUnknown() && member.type.GetValue())
+			{
+				return member.type;
+			}
+
+			return std::nullopt;
+		}
+
+		std::optional<Confidence<Ref<Type>>> MemberTypeForSelfArgument(
+		    BinaryView* view, Function* func, const MediumLevelILInstruction& selfArg, uint64_t offset)
+		{
+			if (!func || selfArg.operation != MLIL_VAR_SSA)
+				return std::nullopt;
+
+			auto selfVar = selfArg.GetSourceSSAVariable<MLIL_VAR_SSA>();
+			if (!IsSelfVariable(func, selfVar))
+				return std::nullopt;
+
+			auto varType = func->GetVariableType(selfVar.var);
+			if (!varType.IsUnknown())
+			{
+				if (auto type = MemberTypeAtOffset(view, varType.GetValue(), offset))
+					return type;
+			}
+
+			auto exprType = selfArg.GetType();
+			if (!exprType.IsUnknown())
+				return MemberTypeAtOffset(view, exprType.GetValue(), offset);
+
+			return std::nullopt;
+		}
+
+		std::optional<uint64_t> ObjCGetPropertyOffset(const std::vector<MediumLevelILInstruction>& params)
+		{
+			if (params.size() == 3)
+				return ConstantInteger(params[1]);
+			if (params.size() >= 4)
+				return ConstantInteger(params[2]);
+			return std::nullopt;
+		}
+
+		std::optional<Confidence<Ref<Type>>> ReturnTypeForObjCGetPropertyCall(
+		    BinaryView* view, Function* func, const MediumLevelILInstruction& instr)
+		{
+			auto call = MatchCallToFunctionNamed(instr, view, kObjCGetPropertyFunctions);
+			if (!call || call->params.size() < 3)
+				return std::nullopt;
+
+			auto offset = ObjCGetPropertyOffset(call->params);
+			if (!offset)
+				return std::nullopt;
+
+			return MemberTypeForSelfArgument(view, func, call->params[0], *offset);
 		}
 
 		std::vector<MediumLevelILInstruction> Instructions(MediumLevelILFunction* function)
@@ -92,19 +218,48 @@ namespace WorkflowObjC::Activities
 			for (const auto& block : function->GetBasicBlocks())
 			{
 				for (size_t i = block->GetStart(); i < block->GetEnd(); ++i)
-					result.push_back(function->GetInstruction(i));
+				{
+					auto instr = function->GetInstruction(i);
+					if (instr.operation == MLIL_GOTO || instr.operation == MLIL_NOP)
+						continue;
+					result.push_back(instr);
+				}
 			}
 			return result;
 		}
 
-		std::optional<Confidence<Ref<Type>>> ReturnTypeForSimpleIvarGetter(Function* func, MediumLevelILFunction* ssa)
+		void EnsureCurrentMethodIvarTypes(BinaryView* view, Function* func)
+		{
+			if (!view || !func)
+				return;
+
+			auto symbol = func->GetSymbol();
+			if (!symbol)
+				return;
+
+			auto className = ClassNameFromObjCMethodSymbolName(symbol->GetRawName());
+			if (!className)
+				return;
+
+			if (auto info = GlobalState::GetAnalysisInfo(view))
+				info->EnsureClassIvarTypes(view, *className);
+		}
+
+		std::optional<Confidence<Ref<Type>>> ReturnTypeForSimpleIvarGetter(
+		    BinaryView* view, Function* func, MediumLevelILFunction* ssa)
 		{
 			auto instructions = Instructions(ssa);
+			if (instructions.size() == 1)
+				return ReturnTypeForObjCGetPropertyCall(view, func, instructions[0]);
+
 			if (instructions.size() != 2)
 				return std::nullopt;
 
 			auto setVar = instructions[0];
 			auto ret = instructions[1];
+			if (auto type = ReturnTypeForObjCGetPropertyCall(view, func, setVar))
+				return type;
+
 			if (setVar.operation != MLIL_SET_VAR_SSA || ret.operation != MLIL_RET)
 				return std::nullopt;
 
@@ -116,6 +271,9 @@ namespace WorkflowObjC::Activities
 				return std::nullopt;
 
 			auto value = setVar.GetSourceExpr<MLIL_SET_VAR_SSA>();
+			if (auto type = ReturnTypeForObjCGetPropertyCall(view, func, value))
+				return type;
+
 			if (value.operation != MLIL_LOAD_STRUCT_SSA)
 				return std::nullopt;
 
@@ -152,7 +310,9 @@ namespace WorkflowObjC::Activities
 		if (!mlilSSA)
 			return;
 
-		auto returnType = ReturnTypeForSimpleIvarGetter(func, mlilSSA);
+		EnsureCurrentMethodIvarTypes(view, func);
+
+		auto returnType = ReturnTypeForSimpleIvarGetter(view, func, mlilSSA);
 		if (!returnType || !ShouldRefineReturnType(func, returnType->GetValue()))
 			return;
 
