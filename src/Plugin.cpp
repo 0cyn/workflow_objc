@@ -27,7 +27,7 @@ extern "C"
 		if (Settings::Instance()->Get<bool>("corePlugins.workflows.objc"))
 		{
 			LogAlert("The 0cyn/workflow_objc plugin conflicts with the default workflow_objc plugin and you must disable it"
-			" via the 'corePlugins.workflows.objc' setting in BinaryNinja preferences before you can use this plugin.");
+			" via the 'corePlugins.workflows.objc' setting in BinaryNinja preferences and restart before you can use this plugin.");
 			return false;
 		}
 
@@ -41,7 +41,7 @@ extern "C"
 		Settings::Instance()->RegisterSetting("analysis.objectiveC.resolveDynamicDispatch", R"({
 			"title" : "Resolve Dynamic Dispatch Calls",
 			"type" : "boolean",
-			"default" : false,
+			"default" : true,
 			"aliases": ["core.function.objectiveC.assumeMessageSendTarget", "core.function.objectiveC.rewriteMessageSendTarget"],
 			"description" : "Replaces objc_msgSend calls with direct calls only when the receiver class is known and the matching target method can be resolved."
 		})");
