@@ -35,6 +35,10 @@ namespace WorkflowObjC
 	/// TODO: Fill in documentation.
 	std::optional<std::string_view> ClassNameFromSymbolName(std::string_view symbolName);
 	/// TODO: Fill in documentation.
+	std::optional<std::string> ClassNameFromType(BinaryNinja::Type* type);
+	/// TODO: Fill in documentation.
+	bool IsAllocLikeSelector(std::string_view name);
+	/// TODO: Fill in documentation.
 	std::optional<std::string> ClassNameFromObjCMethodSymbolName(std::string_view symbolName);
 	/// TODO: Fill in documentation.
 	std::optional<std::string> ClassNameFromClassObjectAddress(
@@ -61,6 +65,8 @@ namespace WorkflowObjC
 	BinaryNinja::Ref<BinaryNinja::Type> NamedType(BinaryNinja::BinaryView* view, std::string_view name);
 	/// TODO: Fill in documentation.
 	BinaryNinja::Ref<BinaryNinja::Type> ClassInstanceType(BinaryNinja::BinaryView* view, std::string_view name);
+	/// TODO: Fill in documentation.
+	std::vector<std::string> GenerateArgumentNames(const std::vector<std::string>& labels);
 
 	/// TODO: Fill in documentation.
 	void AdjustReturnTypeOfCall(const Call& call, BinaryNinja::Type* returnType, uint8_t confidence);

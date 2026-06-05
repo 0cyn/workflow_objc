@@ -1,6 +1,7 @@
 #include "Util.h"
 
 #include <algorithm>
+#include <cctype>
 #include <string>
 
 using namespace BinaryNinja;
@@ -55,6 +56,48 @@ namespace WorkflowObjC
 				return std::nullopt;
 
 			return static_cast<uint64_t>(loadSrc.GetConstant<MLIL_CONST_PTR>());
+		}
+
+		bool IsGenericObjCTypeName(std::string_view name)
+		{
+			return name == "id" || name == "Class" || name == "SEL" || name == "objc_object" ||
+			    name == "objc_class_t" || name == "objc_super";
+		}
+
+		void NormalizeClassTypeName(std::string& name)
+		{
+			if (name.starts_with("struct "))
+				name.erase(0, 7);
+		}
+
+		std::optional<std::string> SelectorLabelWithoutPrefix(std::string_view prefix, std::string_view label)
+		{
+			if (label.size() <= prefix.size() || !label.starts_with(prefix))
+				return std::nullopt;
+
+			std::string afterPrefix(label.substr(prefix.size()));
+			if (afterPrefix.empty() || std::islower(static_cast<unsigned char>(afterPrefix[0])))
+				return std::nullopt;
+
+			if (afterPrefix.size() >= 2 && std::islower(static_cast<unsigned char>(afterPrefix[1])))
+				afterPrefix[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(afterPrefix[0])));
+
+			return afterPrefix;
+		}
+
+		std::string ArgumentNameFromSelectorLabel(const std::string& label)
+		{
+			static constexpr std::string_view prefixes[] = {
+				"initWith", "with", "and", "using", "set", "read", "to", "for",
+			};
+
+			for (auto prefix : prefixes)
+			{
+				if (auto name = SelectorLabelWithoutPrefix(prefix, label))
+					return *name;
+			}
+
+			return label;
 		}
 	}
 
@@ -139,6 +182,74 @@ namespace WorkflowObjC
 		if (symbolName.starts_with("_OBJC_CLASS_$_"))
 			return symbolName.substr(14);
 		return std::nullopt;
+	}
+
+	std::optional<std::string> ClassNameFromType(Type* type)
+	{
+		if (!type)
+			return std::nullopt;
+
+		if (type->IsPointer())
+		{
+			auto childType = type->GetChildType();
+			if (childType.IsUnknown() || !childType.GetValue())
+				return std::nullopt;
+			return ClassNameFromType(childType.GetValue());
+		}
+
+		std::string name;
+		if (type->IsNamedTypeRefer())
+		{
+			auto ref = type->GetNamedTypeReference();
+			if (!ref)
+				return std::nullopt;
+			name = ref->GetName().GetString();
+		}
+		else if (type->IsStructure())
+		{
+			if (auto registeredName = type->GetRegisteredName())
+				name = registeredName->GetName().GetString();
+			if (name.empty())
+				name = type->GetStructureName().GetString();
+		}
+		else
+		{
+			name = type->GetTypeName().GetString();
+		}
+		NormalizeClassTypeName(name);
+
+		if (name.empty() || IsGenericObjCTypeName(name))
+			return std::nullopt;
+		return name;
+	}
+
+	bool IsAllocLikeSelector(std::string_view name)
+	{
+		/*
+		 * I don't know how programmatically solvable this is, maybe apple has grammar rules for this but
+		 *
+			100045910  extern id +[NSScanner scannerWithString:](Class self, SEL sel, int64_t scannerWithString)
+			100045918  extern id +[NSString localizedStringWithFormat:](Class self, SEL sel, int64_t localizedStringWithFormat)
+			100045920  extern id +[NSString stringWithCString:encoding:](Class self, SEL sel, int64_t stringWithCString, int64_t encoding)
+			100045928  extern id +[NSString stringWithCharacters:length:](Class self, SEL sel, int64_t stringWithCharacters, int64_t length)
+			100045930  extern id +[NSString stringWithFormat:](Class self, SEL sel, int64_t stringWithFormat)
+			100045938  extern id +[NSString stringWithUTF8String:](Class self, SEL sel, int64_t stringWithUTF8String)
+			100045940  extern id -[NSString drawInRect:withAttributes:](NSString* self, SEL sel, int64_t drawInRect, int64_t attributes)
+			100045948  extern NSString* -[NSString initWithCString:encoding:](NSString* self, SEL sel, int64_t CString, int64_t encoding)
+			100045950  extern NSString* -[NSString initWithCharactersNoCopy:length:freeWhenDone:](NSString* self, SEL sel, int64_t charactersNoCopy, int64_t length, int64_t freeWhenDone)
+			100045958  extern id -[NSString isEqualToString:](NSString* self, SEL sel, int64_t isEqualToString)
+			100045960  extern uint64_t -[NSString length](void* self, char* _cmd)
+			100045968  extern id -[NSString localizedCaseInsensitiveCompare:](NSString* self, SEL sel, int64_t localizedCaseInsensitiveCompare)
+			100045970  extern id -[NSString stringByAppendingFormat:](NSString* self, SEL sel, int64_t stringByAppendingFormat)
+			100045978  extern id -[NSString stringByAppendingPathComponent:](NSString* self, SEL sel, int64_t stringByAppendingPathComponent)
+			100045980  extern id -[NSString stringByAppendingString:](NSString* self, SEL sel, int64_t stringByAppendingString)
+			100045988  extern id -[NSString stringByReplacingOccurrencesOfString:withString:](NSString* self, SEL sel, int64_t stringByReplacingOccurrencesOfString, int64_t string)
+			100045990  extern id -[NSString substringFromIndex:](NSString* self, SEL sel, int64_t substringFromIndex)
+			100045998  extern id +[NSValue valueWithRange:](Class self, SEL sel, int64_t valueWithRange)
+
+			There is also this pattern for stuff.
+		 */
+		return name == "alloc" || name == "new" || name.starts_with("allocWith") || name.starts_with("newWith");
 	}
 
 	std::optional<std::string> ClassNameFromObjCMethodSymbolName(std::string_view symbolName)
@@ -314,6 +425,15 @@ namespace WorkflowObjC
 			return type;
 
 		return NamedType(view, name);
+	}
+
+	std::vector<std::string> GenerateArgumentNames(const std::vector<std::string>& labels)
+	{
+		std::vector<std::string> result;
+		result.reserve(labels.size());
+		for (const auto& label : labels)
+			result.push_back(ArgumentNameFromSelectorLabel(label));
+		return result;
 	}
 
 	void AdjustReturnTypeOfCall(const Call& call, Type* returnType, uint8_t confidence)
