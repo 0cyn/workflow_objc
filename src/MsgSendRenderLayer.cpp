@@ -217,7 +217,7 @@ namespace WorkflowObjC
 		bool IsGenericObjCTypeName(std::string_view name)
 		{
 			return name == "id" || name == "Class" || name == "SEL" || name == "objc_object" ||
-			    name == "objc_class_t" || name == "objc_super";
+			    name == "objc_class" || name == "objc_class_t" || name == "objc_super";
 		}
 
 		void NormalizeClassTypeName(std::string& name)
@@ -304,6 +304,21 @@ namespace WorkflowObjC
 
 			if (auto selfKey = MethodKeyFromCurrentMethodSelf(instr, receiver, selectorName))
 				return selfKey;
+
+			if (auto receiverVar = VariableFromExpr(receiver))
+			{
+				auto function = instr.function ? instr.function->GetFunction() : nullptr;
+				if (function)
+				{
+					auto variableType = function->GetVariableType(*receiverVar);
+					if (!variableType.IsUnknown())
+					{
+						if (auto className = ClassNameFromType(variableType.GetValue()))
+							return ObjCMethodRequestKey {
+							    *className, std::string(selectorName), ObjCMethodKind::Instance};
+					}
+				}
+			}
 
 			auto type = receiver.GetType();
 			if (type.IsUnknown() || !type.GetValue())

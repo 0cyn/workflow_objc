@@ -357,6 +357,21 @@ namespace WorkflowObjC::Activities
 			if (call.params.empty())
 				return std::nullopt;
 
+			if (call.params[0].operation == MLIL_VAR_SSA && call.params[0].function)
+			{
+				auto function = call.params[0].function->GetFunction();
+				if (function)
+				{
+					auto variableType = function->GetVariableType(
+					    call.params[0].GetSourceSSAVariable<MLIL_VAR_SSA>().var);
+					if (!variableType.IsUnknown())
+					{
+						if (auto className = ClassNameFromType(variableType.GetValue()))
+							return ReceiverInfo {*className, ObjCMethodKind::Instance};
+					}
+				}
+			}
+
 			auto type = call.params[0].GetType();
 			if (type.IsUnknown() || !type.GetValue())
 				return std::nullopt;

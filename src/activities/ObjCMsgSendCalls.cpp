@@ -844,6 +844,50 @@ namespace WorkflowObjC::Activities
 			return ReturnValue(type, false, Confidence<ValueLocation>(location, inferredReturn.confidence));
 		}
 
+		bool IsEquivalentObjCType(Type* existingType, Type* newType)
+		{
+			if (!existingType || !newType)
+				return false;
+			if (*existingType == *newType)
+				return true;
+
+			if (!existingType->IsPointer() || !newType->IsPointer())
+				return false;
+
+			auto existingClassName = ClassNameFromType(existingType);
+			auto newClassName = ClassNameFromType(newType);
+			return existingClassName && newClassName && *existingClassName == *newClassName;
+		}
+
+		bool IsEquivalentTypeConfidence(Confidence<Ref<Type>> existingType, Confidence<Ref<Type>> newType)
+		{
+			if (existingType.IsUnknown() || newType.IsUnknown())
+				return false;
+			return IsEquivalentObjCType(existingType.GetValue(), newType.GetValue());
+		}
+
+		bool IsEquivalentObjCMsgSendFunctionType(Type* existingType, Type* newType)
+		{
+			if (!existingType || !newType || !existingType->IsFunction() || !newType->IsFunction())
+				return false;
+
+			if (!IsEquivalentTypeConfidence(existingType->GetReturnValue().type, newType->GetReturnValue().type))
+				return false;
+
+			auto existingParams = existingType->GetParameters();
+			auto newParams = newType->GetParameters();
+			if (existingParams.size() != newParams.size())
+				return false;
+
+			for (size_t i = 0; i < existingParams.size(); ++i)
+			{
+				if (!IsEquivalentTypeConfidence(existingParams[i].type, newParams[i].type))
+					return false;
+			}
+
+			return true;
+		}
+
 		bool AdjustCallType(
 		    BinaryView* bv, Function* func, LowLevelILFunction* ssa, const LowLevelILInstruction& instr,
 		    const Selector& selector, MessageSendType messageSendType)
@@ -927,6 +971,14 @@ namespace WorkflowObjC::Activities
 			    ReturnValueForCall(instr, inferredReturn),
 			    Confidence<Ref<CallingConvention>>(callingConvention, callingConvention ? confidence : 0), params,
 			    Confidence<bool>(false));
+
+			auto existingAdjustment = func->GetCallTypeAdjustment(arch, instr.address);
+			if (!existingAdjustment.IsUnknown() && existingAdjustment.GetValue() &&
+			    IsEquivalentObjCMsgSendFunctionType(existingAdjustment.GetValue(), functionType) &&
+			    existingAdjustment.GetConfidence() >= inferredReturn.confidence)
+			{
+				return false;
+			}
 
 			func->SetAutoCallTypeAdjustment(
 			    arch, instr.address, Confidence<Ref<Type>>(functionType, inferredReturn.confidence));

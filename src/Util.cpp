@@ -61,13 +61,44 @@ namespace WorkflowObjC
 		bool IsGenericObjCTypeName(std::string_view name)
 		{
 			return name == "id" || name == "Class" || name == "SEL" || name == "objc_object" ||
-			    name == "objc_class_t" || name == "objc_super";
+			    name == "objc_class" || name == "objc_class_t" || name == "objc_super";
 		}
 
 		void NormalizeClassTypeName(std::string& name)
 		{
 			if (name.starts_with("struct "))
 				name.erase(0, 7);
+		}
+
+		std::optional<std::string> ClassNameFromNonPointerType(Type* type)
+		{
+			if (!type)
+				return std::nullopt;
+
+			std::string name;
+			if (type->IsNamedTypeRefer())
+			{
+				auto ref = type->GetNamedTypeReference();
+				if (!ref)
+					return std::nullopt;
+				name = ref->GetName().GetString();
+			}
+			else if (type->IsStructure())
+			{
+				if (auto registeredName = type->GetRegisteredName())
+					name = registeredName->GetName().GetString();
+				if (name.empty())
+					name = type->GetStructureName().GetString();
+			}
+			else
+			{
+				name = type->GetTypeName().GetString();
+			}
+			NormalizeClassTypeName(name);
+
+			if (name.empty() || IsGenericObjCTypeName(name))
+				return std::nullopt;
+			return name;
 		}
 
 		std::optional<std::string> SelectorLabelWithoutPrefix(std::string_view prefix, std::string_view label)
@@ -197,30 +228,7 @@ namespace WorkflowObjC
 			return ClassNameFromType(childType.GetValue());
 		}
 
-		std::string name;
-		if (type->IsNamedTypeRefer())
-		{
-			auto ref = type->GetNamedTypeReference();
-			if (!ref)
-				return std::nullopt;
-			name = ref->GetName().GetString();
-		}
-		else if (type->IsStructure())
-		{
-			if (auto registeredName = type->GetRegisteredName())
-				name = registeredName->GetName().GetString();
-			if (name.empty())
-				name = type->GetStructureName().GetString();
-		}
-		else
-		{
-			name = type->GetTypeName().GetString();
-		}
-		NormalizeClassTypeName(name);
-
-		if (name.empty() || IsGenericObjCTypeName(name))
-			return std::nullopt;
-		return name;
+		return ClassNameFromNonPointerType(type);
 	}
 
 	bool IsAllocLikeSelector(std::string_view name)

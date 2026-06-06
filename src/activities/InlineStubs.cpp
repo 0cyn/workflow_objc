@@ -16,7 +16,13 @@ namespace WorkflowObjC::Activities
 			return;
 
 		auto func = ac->GetFunction();
-		if (info->objcStubs->Contains(func->GetStart()))
-			func->SetAutoInlinedDuringAnalysis(InlineUsingCallAddress);
+		if (!info->objcStubs->Contains(func->GetStart()))
+			return;
+
+		auto existing = func->GetInlinedDuringAnalysis();
+		if (!existing.IsUnknown() && existing.GetValue() == InlineUsingCallAddress)
+			return;
+
+		func->SetAutoInlinedDuringAnalysis(InlineUsingCallAddress);
 	}
 }

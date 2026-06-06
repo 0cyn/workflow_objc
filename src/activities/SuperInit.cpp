@@ -46,6 +46,16 @@ namespace WorkflowObjC::Activities
 			return view == "_objc_msgSendSuper2";
 		}
 
+		bool IsSameObjCClassPointer(Type* existingType, Type* newType)
+		{
+			if (!existingType || !newType || !existingType->IsPointer() || !newType->IsPointer())
+				return false;
+
+			auto existingClassName = ClassNameFromType(existingType);
+			auto newClassName = ClassNameFromType(newType);
+			return existingClassName && newClassName && *existingClassName == *newClassName;
+		}
+
 		std::optional<ClassReferenceInfo> ClassReferenceFromExpr(
 		    BinaryView* view, const MediumLevelILInstruction& expr)
 		{
@@ -207,7 +217,8 @@ namespace WorkflowObjC::Activities
 				return false;
 
 			auto existingType = function->GetVariableType(var);
-			if (!existingType.IsUnknown() && existingType.GetValue() && *existingType.GetValue() == *returnType)
+			if (!existingType.IsUnknown() && existingType.GetValue() &&
+			    (*existingType.GetValue() == *returnType || IsSameObjCClassPointer(existingType.GetValue(), returnType)))
 				return false;
 
 			function->CreateAutoVariable(var, Confidence<Ref<Type>>(returnType, confidence),
@@ -262,7 +273,8 @@ namespace WorkflowObjC::Activities
 				return;
 
 			auto existingReturn = function->GetReturnType();
-			if (!existingReturn.IsUnknown() && existingReturn.GetValue() && *existingReturn.GetValue() == *returnType)
+			if (!existingReturn.IsUnknown() && existingReturn.GetValue() &&
+			    (*existingReturn.GetValue() == *returnType || IsSameObjCClassPointer(existingReturn.GetValue(), returnType)))
 				return;
 
 			function->SetAutoReturnType(Confidence<Ref<Type>>(returnType, confidence));

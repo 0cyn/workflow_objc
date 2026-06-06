@@ -481,6 +481,22 @@ TEST(ClassNameFromObjCMethodSymbolName, RejectsNonMethodSymbols)
 	EXPECT_FALSE(WorkflowObjC::ClassNameFromObjCMethodSymbolName("cls_LCDController"));
 }
 
+TEST_F(BinaryNinjaCoreTest, ClassNameFromTypeRejectsObjCRuntimeTypes)
+{
+	BinaryNinja::StructureBuilder builder;
+	auto structureType = BinaryNinja::Type::StructureType(builder.Finalize());
+
+	auto objcClassType = BinaryNinja::Type::NamedType(BinaryNinja::QualifiedName("objc_class"), structureType);
+	ASSERT_TRUE(objcClassType);
+	EXPECT_FALSE(WorkflowObjC::ClassNameFromType(BinaryNinja::Type::PointerType(8, objcClassType)));
+
+	auto nsArrayType = BinaryNinja::Type::NamedType(BinaryNinja::QualifiedName("NSArray"), structureType);
+	ASSERT_TRUE(nsArrayType);
+	EXPECT_EQ(
+	    WorkflowObjC::ClassNameFromType(BinaryNinja::Type::PointerType(8, nsArrayType)),
+	    std::optional<std::string>("NSArray"));
+}
+
 TEST(Selector, IdentifiesInitFamilySelectors)
 {
 	EXPECT_TRUE((WorkflowObjC::Selector {"init", 0}.IsInitFamily()));

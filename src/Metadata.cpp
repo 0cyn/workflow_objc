@@ -255,6 +255,115 @@ namespace WorkflowObjC
 			return std::string(encoding.substr(1, end - 1));
 		}
 
+		bool IsObjCClassStructName(std::string_view name)
+		{
+			return name == "objc_class" || name == "objc_class_t";
+		}
+
+		Ref<Type> ObjCClassPointerType(BinaryView* bv, Architecture* arch)
+		{
+			if (auto classType = NamedType(bv, "Class"))
+				return classType;
+			if (auto objcClassType = NamedType(bv, "objc_class_t"))
+				return Type::PointerType(arch, objcClassType);
+			return Type::PointerType(arch, Type::VoidType());
+		}
+
+		std::string ObjCRuntimeTypeName(Type* type)
+		{
+			if (!type)
+				return {};
+
+			std::string name;
+			if (type->IsNamedTypeRefer())
+			{
+				auto ref = type->GetNamedTypeReference();
+				if (ref)
+					name = ref->GetName().GetString();
+			}
+			else if (type->IsStructure())
+			{
+				if (auto registeredName = type->GetRegisteredName())
+					name = registeredName->GetName().GetString();
+				if (name.empty())
+					name = type->GetStructureName().GetString();
+			}
+			else
+			{
+				name = type->GetTypeName().GetString();
+			}
+
+			if (name.starts_with("struct "))
+				name.erase(0, 7);
+			return name;
+		}
+
+		bool IsInlineObjCClassRuntimeType(Type* type)
+		{
+			return type && !type->IsPointer() && IsObjCClassStructName(ObjCRuntimeTypeName(type));
+		}
+
+		bool RepairInlineObjCClassRuntimeMembers(BinaryView* bv, StructureBuilder& builder)
+		{
+			auto classPointerType = ObjCClassPointerType(bv, bv ? bv->GetDefaultArchitecture() : nullptr);
+			if (!classPointerType)
+				return false;
+
+			bool changed = false;
+			auto members = builder.GetMembers();
+			for (size_t i = 0; i < members.size(); ++i)
+			{
+				const auto& member = members[i];
+				if (member.type.IsUnknown() || !IsInlineObjCClassRuntimeType(member.type.GetValue()))
+					continue;
+
+				builder.ReplaceMember(i, Confidence<Ref<Type>>(classPointerType, BN_FULL_CONFIDENCE), member.name);
+				changed = true;
+			}
+
+			return changed;
+		}
+
+		bool MemberMatchesIvar(const StructureMember& member, Type* type, const std::string& name)
+		{
+			return !member.type.IsUnknown() && member.type.GetValue() && *member.type.GetValue() == *type &&
+			    member.name == name;
+		}
+
+		bool SetIvarMemberAtOffset(StructureBuilder& builder, Type* type, const std::string& name, uint64_t offset)
+		{
+			bool changed = false;
+			bool foundMatchingMember = false;
+			std::vector<size_t> membersToRemove;
+			auto members = builder.GetMembers();
+			for (size_t i = 0; i < members.size(); ++i)
+			{
+				const auto& member = members[i];
+				if (member.offset != offset)
+					continue;
+
+				if (!foundMatchingMember && MemberMatchesIvar(member, type, name))
+				{
+					foundMatchingMember = true;
+					continue;
+				}
+
+				membersToRemove.push_back(i);
+			}
+
+			for (auto it = membersToRemove.rbegin(); it != membersToRemove.rend(); ++it)
+			{
+				builder.RemoveMember(*it);
+				changed = true;
+			}
+
+			if (foundMatchingMember)
+				return changed;
+
+			builder.AddMemberAtOffset(Confidence<Ref<Type>>(type, BN_FULL_CONFIDENCE), name, offset, true);
+			return true;
+		}
+
 		std::string IvarFieldName(std::string_view name, uint64_t offset)
 		{
 			std::string result;
@@ -299,11 +408,7 @@ namespace WorkflowObjC
 					return idType;
 				return Type::PointerType(arch, Type::VoidType());
 			case '#':
-				if (auto classType = NamedType(bv, "Class"))
-					return classType;
-				if (auto objcClassType = NamedType(bv, "objc_class_t"))
-					return Type::PointerType(arch, objcClassType);
-				return Type::PointerType(arch, Type::VoidType());
+				return ObjCClassPointerType(bv, arch);
 			case ':':
 				if (auto selType = NamedType(bv, "SEL"))
 					return selType;
@@ -337,6 +442,8 @@ namespace WorkflowObjC
 			case '{':
 				if (auto structName = StructNameFromObjCTypeEncoding(encoding))
 				{
+					if (IsObjCClassStructName(*structName))
+						return ObjCClassPointerType(bv, arch);
 					if (auto structType = NamedType(bv, *structName))
 						return structType;
 				}
@@ -535,36 +642,49 @@ namespace WorkflowObjC
 				return false;
 
 			auto classIt = index.ivars.find(className);
-			if (classIt == index.ivars.end() || classIt->second.empty())
-				return false;
+			bool hasIvars = classIt != index.ivars.end() && !classIt->second.empty();
 
 			QualifiedName classTypeName(className);
 			auto existingType = bv->GetTypeByName(classTypeName);
 			if (existingType && !bv->IsTypeAutoDefined(classTypeName))
 				return false;
-
-			StructureBuilder builder;
-			if (existingType && existingType->IsStructure())
-				builder = existingType->GetStructure();
-			else
-				builder.SetStructureType(StructStructureType);
+			if (!existingType && !hasIvars)
+				return false;
 
 			bool changed = false;
+			StructureBuilder builder;
+			if (existingType && existingType->IsStructure())
+			{
+				builder = existingType->GetStructure();
+				changed |= RepairInlineObjCClassRuntimeMembers(bv, builder);
+			}
+			else
+			{
+				builder.SetStructureType(StructStructureType);
+			}
+
+			if (!hasIvars)
+			{
+				if (!changed)
+					return false;
+
+				std::string typeId = bv->GetTypeId(classTypeName);
+				if (typeId.empty())
+					typeId = Type::GenerateAutoTypeId("objective-c", classTypeName);
+				bv->DefineType(typeId, classTypeName, Type::StructureType(builder.Finalize()));
+				return true;
+			}
+
 			uint64_t width = builder.GetWidth();
 			for (const auto& ivar : classIt->second)
 			{
-				StructureMember existingMember;
-				if (builder.GetMemberAtOffset(static_cast<int64_t>(ivar.offset), existingMember))
-					continue;
-
 				auto type = TypeForObjCTypeEncoding(bv, bv->GetDefaultArchitecture(), ivar.typeEncoding, ivar.size);
 				if (!type)
 					continue;
 
-				builder.AddMemberAtOffset(Confidence<Ref<Type>>(type, BN_FULL_CONFIDENCE),
-				    IvarFieldName(ivar.name, ivar.offset), ivar.offset, false);
+				std::string memberName = IvarFieldName(ivar.name, ivar.offset);
+				changed |= SetIvarMemberAtOffset(builder, type, memberName, ivar.offset);
 				width = std::max<uint64_t>(width, ivar.offset + std::max<uint64_t>(ivar.size, type->GetWidth()));
-				changed = true;
 			}
 
 			if (!changed)
@@ -826,12 +946,6 @@ namespace WorkflowObjC
 	{
 		if (!bv || className.empty())
 			return false;
-
-		{
-			std::shared_lock lock(m_objcIvarTypeIndexMutex);
-			if (m_objcIvarTypeIndexLoaded)
-				return m_objcIvarTypeIndex ? EnsureClassIvarTypesFromIndex(bv, *m_objcIvarTypeIndex, className) : false;
-		}
 
 		std::unique_lock lock(m_objcIvarTypeIndexMutex);
 		if (!m_objcIvarTypeIndexLoaded)
