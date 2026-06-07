@@ -5,6 +5,14 @@ using namespace BinaryNinja;
 
 namespace WorkflowObjC::Activities
 {
+	/**!
+	 *
+	 * This activity is in charge of inlining objc_msgSend$blah outlines from newer ObjC binaries
+	 *
+	 * Does so by just checking if the function it is running on is in that section and editing its inline setting
+	 *		if so.
+	 *
+	 */
 	void ProcessInlineStubs(Ref<AnalysisContext> ac)
 	{
 		auto view = ac->GetBinaryView();

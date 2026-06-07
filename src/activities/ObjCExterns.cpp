@@ -37,83 +37,51 @@ namespace WorkflowObjC::Activities
 			"j__objc_msgSend",
 		};
 
-		std::optional<uint64_t> ConstantLikeValue(const RegisterValue& value)
-		{
-			switch (value.state)
-			{
-			case ConstantValue:
-			case ConstantPointerValue:
-			case ImportedAddressValue:
-				return static_cast<uint64_t>(value.value);
-			default:
-				return std::nullopt;
-			}
-		}
-
-		Ref<Type> PointerToType(Architecture* arch, Ref<Type> type)
-		{
-			if (!type)
-				return nullptr;
-			return Type::PointerType(arch, type);
-		}
-
-		std::optional<std::string> ExternalLibraryNameFromMetadata(BinaryView* bv, std::string_view symbolName)
-		{
-			if (!bv || symbolName.empty())
-				return std::nullopt;
-
-			auto mapping = bv->QueryMetadata("SymbolExternalLibraryMapping");
-			if (!mapping || mapping->GetType() != KeyValueDataType)
-				return std::nullopt;
-
-			auto value = mapping->Get(std::string(symbolName));
-			if (!value || value->GetType() != StringDataType)
-				return std::nullopt;
-
-			std::string libraryName = value->GetString();
-			if (libraryName.empty())
-				return std::nullopt;
-			return libraryName;
-		}
-
-		std::optional<std::string> ExternalLibraryNameForSymbol(BinaryView* bv, Symbol* symbol)
-		{
-			if (!bv || !symbol)
-				return std::nullopt;
-
-			if (auto location = bv->GetExternalLocation(symbol))
-			{
-				if (auto library = location->GetExternalLibrary())
-				{
-					std::string libraryName = library->GetName();
-					if (!libraryName.empty())
-						return libraryName;
-				}
-			}
-
-			for (const auto& name : {symbol->GetRawName(), symbol->GetFullName(), symbol->GetShortName()})
-			{
-				if (auto libraryName = ExternalLibraryNameFromMetadata(bv, name))
-					return libraryName;
-			}
-
-			return std::nullopt;
-		}
-
 		std::optional<std::string> ExternalLibraryNameForObjCClass(BinaryView* bv, const std::string& className)
 		{
 			if (!bv || className.empty())
 				return std::nullopt;
 
 			std::string symbolName = "_OBJC_CLASS_$_" + className;
+			auto mapping = bv->QueryMetadata("SymbolExternalLibraryMapping");
+			auto metadataLibraryName = [&mapping](std::string_view name) -> std::optional<std::string> {
+				if (name.empty() || !mapping || mapping->GetType() != KeyValueDataType)
+					return std::nullopt;
+
+				auto value = mapping->Get(std::string(name));
+				if (!value || value->GetType() != StringDataType)
+					return std::nullopt;
+
+				std::string libraryName = value->GetString();
+				if (libraryName.empty())
+					return std::nullopt;
+				return libraryName;
+			};
+
 			for (const auto& nameSpace : {BinaryView::GetInternalNameSpace(), BinaryView::GetExternalNameSpace()})
 			{
 				auto symbol = bv->GetSymbolByRawName(symbolName, nameSpace);
-				if (auto libraryName = ExternalLibraryNameForSymbol(bv, symbol))
-					return libraryName;
+				if (!symbol)
+					continue;
+
+				if (auto location = bv->GetExternalLocation(symbol))
+				{
+					if (auto library = location->GetExternalLibrary())
+					{
+						std::string libraryName = library->GetName();
+						if (!libraryName.empty())
+							return libraryName;
+					}
+				}
+
+				for (const auto& name : {symbol->GetRawName(), symbol->GetFullName(), symbol->GetShortName()})
+				{
+					if (auto libraryName = metadataLibraryName(name))
+						return libraryName;
+				}
 			}
 
-			return ExternalLibraryNameFromMetadata(bv, symbolName);
+			return metadataLibraryName(symbolName);
 		}
 
 		int ObjCMethodKindSortValue(ObjCMethodKind methodKind)
@@ -151,18 +119,6 @@ namespace WorkflowObjC::Activities
 			return entries;
 		}
 
-		Ref<ExternalLibrary> ObjCExternExternalLibrary(
-		    BinaryView* bv, const std::optional<std::string>& libraryName)
-		{
-			if (!bv || !libraryName || libraryName->empty())
-				return nullptr;
-
-			auto library = bv->GetExternalLibrary(*libraryName);
-			if (!library)
-				library = bv->AddExternalLibrary(*libraryName, {}, true);
-			return library;
-		}
-
 		void RecordObjCExternLibraryMapping(
 		    BinaryView* bv, std::string_view symbolName, const std::optional<std::string>& libraryName)
 		{
@@ -181,9 +137,12 @@ namespace WorkflowObjC::Activities
 		void RecordObjCExternExternalLocation(
 		    BinaryView* bv, std::string_view symbolName, const std::optional<std::string>& libraryName)
 		{
-			auto library = ObjCExternExternalLibrary(bv, libraryName);
-			if (!bv || symbolName.empty() || !library)
+			if (!bv || symbolName.empty() || !libraryName || libraryName->empty())
 				return;
+
+			auto library = bv->GetExternalLibrary(*libraryName);
+			if (!library)
+				library = bv->AddExternalLibrary(*libraryName, {}, true);
 
 			auto symbol = bv->GetSymbolByRawName(std::string(symbolName), BinaryView::GetInternalNameSpace());
 			if (!symbol)
@@ -217,14 +176,14 @@ namespace WorkflowObjC::Activities
 			if (key.methodKind == ObjCMethodKind::Instance)
 			{
 				if (auto classType = NamedType(bv, key.className))
-					return PointerToType(arch, classType);
+					return Type::PointerType(arch, classType);
 			}
 			else
 			{
 				if (auto classType = NamedType(bv, "Class"))
 					return classType;
 				if (auto objcClassType = NamedType(bv, "objc_class_t"))
-					return PointerToType(arch, objcClassType);
+					return Type::PointerType(arch, objcClassType);
 			}
 
 			if (auto idType = NamedType(bv, "id"))
@@ -239,7 +198,7 @@ namespace WorkflowObjC::Activities
 			    (key.methodKind == ObjCMethodKind::Class && IsAllocLikeSelector(key.selectorName)))
 			{
 				if (auto classType = NamedType(bv, key.className))
-					return PointerToType(arch, classType);
+					return Type::PointerType(arch, classType);
 			}
 
 			if (auto idType = NamedType(bv, "id"))
@@ -334,7 +293,16 @@ namespace WorkflowObjC::Activities
 			if (expr.operation == MLIL_VAR_SSA && expr.function)
 			{
 				auto var = expr.GetSourceSSAVariable<MLIL_VAR_SSA>();
-				return ConstantLikeValue(expr.function->GetSSAVarValue(var));
+				auto value = expr.function->GetSSAVarValue(var);
+				switch (value.state)
+				{
+				case ConstantValue:
+				case ConstantPointerValue:
+				case ImportedAddressValue:
+					return static_cast<uint64_t>(value.value);
+				default:
+					break;
+				}
 			}
 
 			return std::nullopt;

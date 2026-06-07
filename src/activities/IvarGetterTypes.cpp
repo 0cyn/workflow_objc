@@ -21,6 +21,7 @@ namespace WorkflowObjC::Activities
 
 		bool IsObjectiveCInstanceGetter(Function* func)
 		{
+			// FIXME: We could with some wiring check metadata to know this more confidently.
 			if (!func)
 				return false;
 
@@ -95,30 +96,6 @@ namespace WorkflowObjC::Activities
 			return var.var == params.GetValue().front();
 		}
 
-		std::optional<uint64_t> ConstantInteger(const MediumLevelILInstruction& expr)
-		{
-			switch (expr.operation)
-			{
-			case MLIL_CONST:
-				return static_cast<uint64_t>(expr.GetConstant<MLIL_CONST>());
-			case MLIL_CONST_PTR:
-				return static_cast<uint64_t>(expr.GetConstant<MLIL_CONST_PTR>());
-			default:
-				break;
-			}
-
-			auto value = expr.GetPossibleValues();
-			switch (value.state)
-			{
-			case ConstantValue:
-			case ConstantPointerValue:
-			case ImportedAddressValue:
-				return static_cast<uint64_t>(value.value);
-			default:
-				return std::nullopt;
-			}
-		}
-
 		Ref<Type> ResolveNamedType(BinaryView* view, Type* type)
 		{
 			if (!type || !type->IsNamedTypeRefer())
@@ -189,15 +166,6 @@ namespace WorkflowObjC::Activities
 			return std::nullopt;
 		}
 
-		std::optional<uint64_t> ObjCGetPropertyOffset(const std::vector<MediumLevelILInstruction>& params)
-		{
-			if (params.size() == 3)
-				return ConstantInteger(params[1]);
-			if (params.size() >= 4)
-				return ConstantInteger(params[2]);
-			return std::nullopt;
-		}
-
 		std::optional<Confidence<Ref<Type>>> ReturnTypeForObjCGetPropertyCall(
 		    BinaryView* view, Function* func, const MediumLevelILInstruction& instr)
 		{
@@ -205,11 +173,18 @@ namespace WorkflowObjC::Activities
 			if (!call || call->params.size() < 3)
 				return std::nullopt;
 
-			auto offset = ObjCGetPropertyOffset(call->params);
-			if (!offset)
+			const auto& offsetParam = call->params.size() == 3 ? call->params[1] : call->params[2];
+			auto offsetValue = offsetParam.GetPossibleValues();
+			switch (offsetValue.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				return MemberTypeForSelfArgument(
+				    view, func, call->params[0], static_cast<uint64_t>(offsetValue.value));
+			default:
 				return std::nullopt;
-
-			return MemberTypeForSelfArgument(view, func, call->params[0], *offset);
+			}
 		}
 
 		std::vector<MediumLevelILInstruction> Instructions(MediumLevelILFunction* function)
@@ -245,51 +220,6 @@ namespace WorkflowObjC::Activities
 				info->EnsureClassIvarTypes(view, *className);
 		}
 
-		std::optional<Confidence<Ref<Type>>> ReturnTypeForSimpleIvarGetter(
-		    BinaryView* view, Function* func, MediumLevelILFunction* ssa)
-		{
-			auto instructions = Instructions(ssa);
-			if (instructions.size() == 1)
-				return ReturnTypeForObjCGetPropertyCall(view, func, instructions[0]);
-
-			if (instructions.size() != 2)
-				return std::nullopt;
-
-			auto setVar = instructions[0];
-			auto ret = instructions[1];
-			if (auto type = ReturnTypeForObjCGetPropertyCall(view, func, setVar))
-				return type;
-
-			if (setVar.operation != MLIL_SET_VAR_SSA || ret.operation != MLIL_RET)
-				return std::nullopt;
-
-			auto returnExprs = ret.GetSourceExprs<MLIL_RET>();
-			if (returnExprs.size() != 1 || returnExprs[0].operation != MLIL_VAR_SSA)
-				return std::nullopt;
-
-			if (returnExprs[0].GetSourceSSAVariable<MLIL_VAR_SSA>() != setVar.GetDestSSAVariable<MLIL_SET_VAR_SSA>())
-				return std::nullopt;
-
-			auto value = setVar.GetSourceExpr<MLIL_SET_VAR_SSA>();
-			if (auto type = ReturnTypeForObjCGetPropertyCall(view, func, value))
-				return type;
-
-			if (value.operation != MLIL_LOAD_STRUCT_SSA)
-				return std::nullopt;
-
-			auto base = value.GetSourceExpr<MLIL_LOAD_STRUCT_SSA>();
-			if (base.operation != MLIL_VAR_SSA)
-				return std::nullopt;
-
-			if (!IsSelfVariable(func, base.GetSourceSSAVariable<MLIL_VAR_SSA>()))
-				return std::nullopt;
-
-			auto type = value.GetType();
-			if (type.IsUnknown() || !type.GetValue())
-				return std::nullopt;
-
-			return type;
-		}
 	}
 
 	void ProcessIvarGetterTypes(Ref<AnalysisContext> ac)
@@ -312,7 +242,61 @@ namespace WorkflowObjC::Activities
 
 		EnsureCurrentMethodIvarTypes(view, func);
 
-		auto returnType = ReturnTypeForSimpleIvarGetter(view, func, mlilSSA);
+		std::optional<Confidence<Ref<Type>>> returnType;
+		auto instructions = Instructions(mlilSSA);
+		if (instructions.size() == 1)
+		{
+			returnType = ReturnTypeForObjCGetPropertyCall(view, func, instructions[0]);
+		}
+		else if (instructions.size() == 2)
+		{
+			auto setVar = instructions[0];
+			auto ret = instructions[1];
+			if (auto type = ReturnTypeForObjCGetPropertyCall(view, func, setVar))
+			{
+				returnType = type;
+			}
+			else
+			{
+				if (setVar.operation != MLIL_SET_VAR_SSA || ret.operation != MLIL_RET)
+					return;
+
+				auto returnExprs = ret.GetSourceExprs<MLIL_RET>();
+				if (returnExprs.size() != 1 || returnExprs[0].operation != MLIL_VAR_SSA)
+					return;
+
+				if (returnExprs[0].GetSourceSSAVariable<MLIL_VAR_SSA>() !=
+				    setVar.GetDestSSAVariable<MLIL_SET_VAR_SSA>())
+				{
+					return;
+				}
+
+				auto value = setVar.GetSourceExpr<MLIL_SET_VAR_SSA>();
+				if (auto type = ReturnTypeForObjCGetPropertyCall(view, func, value))
+				{
+					returnType = type;
+				}
+				else
+				{
+					if (value.operation != MLIL_LOAD_STRUCT_SSA)
+						return;
+
+					auto base = value.GetSourceExpr<MLIL_LOAD_STRUCT_SSA>();
+					if (base.operation != MLIL_VAR_SSA)
+						return;
+
+					if (!IsSelfVariable(func, base.GetSourceSSAVariable<MLIL_VAR_SSA>()))
+						return;
+
+					auto valueType = value.GetType();
+					if (valueType.IsUnknown() || !valueType.GetValue())
+						return;
+
+					returnType = valueType;
+				}
+			}
+		}
+
 		if (!returnType || !ShouldRefineReturnType(func, returnType->GetValue()))
 			return;
 

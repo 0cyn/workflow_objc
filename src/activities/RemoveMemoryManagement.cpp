@@ -3,6 +3,7 @@
 
 #include <lowlevelilinstruction.h>
 
+#include <algorithm>
 #include <optional>
 #include <string_view>
 
@@ -24,53 +25,47 @@ namespace WorkflowObjC::Activities
 			"_objc_unsafeClaimAutoreleasedReturnValue",
 		};
 
-		bool IsIgnorableName(std::string_view name)
-		{
-			if (name.starts_with("j_"))
-				name.remove_prefix(2);
-
-			return std::find(kIgnorableMemoryManagementFunctions.begin(), kIgnorableMemoryManagementFunctions.end(), name)
-			    != kIgnorableMemoryManagementFunctions.end();
-		}
-
-		std::optional<uint64_t> ConstantCallTarget(const PossibleValueSet& value)
-		{
-			switch (value.state)
-			{
-			case ConstantValue:
-			case ConstantPointerValue:
-			case ImportedAddressValue:
-				return static_cast<uint64_t>(value.value);
-			default:
-				return std::nullopt;
-			}
-		}
-
-		std::optional<uint64_t> InstructionTargetAddress(LowLevelILFunction* llil, const LowLevelILInstruction& instr)
-		{
-			if (instr.operation == LLIL_CALL || instr.operation == LLIL_TAILCALL)
-				return ConstantCallTarget(instr.GetDestExpr().GetPossibleValues());
-
-			if (instr.operation == LLIL_GOTO)
-			{
-				size_t targetIndex = instr.GetTarget<LLIL_GOTO>();
-				if (targetIndex == BN_INVALID_EXPR || targetIndex >= llil->GetInstructionCount())
-					return std::nullopt;
-				return llil->GetInstruction(targetIndex).address;
-			}
-
-			return std::nullopt;
-		}
-
 		bool IsCallToIgnorableMemoryManagementFunction(
 		    BinaryView* view, LowLevelILFunction* llil, const LowLevelILInstruction& instr)
 		{
-			auto target = InstructionTargetAddress(llil, instr);
-			if (!target)
+			std::optional<uint64_t> target;
+			if (instr.operation == LLIL_CALL || instr.operation == LLIL_TAILCALL)
+			{
+				auto value = instr.GetDestExpr().GetPossibleValues();
+				switch (value.state)
+				{
+				case ConstantValue:
+				case ConstantPointerValue:
+				case ImportedAddressValue:
+					target = static_cast<uint64_t>(value.value);
+					break;
+				default:
+					return false;
+				}
+			}
+			else if (instr.operation == LLIL_GOTO)
+			{
+				size_t targetIndex = instr.GetTarget<LLIL_GOTO>();
+				if (targetIndex == BN_INVALID_EXPR || targetIndex >= llil->GetInstructionCount())
+					return false;
+				target = llil->GetInstruction(targetIndex).address;
+			}
+			else
+			{
 				return false;
+			}
 
 			auto symbol = view->GetSymbolByAddress(*target);
-			return symbol && IsIgnorableName(symbol->GetFullName());
+			if (!symbol)
+				return false;
+
+			std::string name = symbol->GetFullName();
+			std::string_view nameView(name);
+			if (nameView.starts_with("j_"))
+				nameView.remove_prefix(2);
+
+			return std::find(kIgnorableMemoryManagementFunctions.begin(), kIgnorableMemoryManagementFunctions.end(), nameView)
+			    != kIgnorableMemoryManagementFunctions.end();
 		}
 
 		bool ProcessInstruction(

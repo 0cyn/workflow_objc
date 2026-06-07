@@ -49,32 +49,6 @@ namespace WorkflowObjC::Activities
 			"j__objc_opt_new",
 		};
 
-		std::optional<uint64_t> ConstantLikeValue(const PossibleValueSet& value)
-		{
-			switch (value.state)
-			{
-			case ConstantValue:
-			case ConstantPointerValue:
-			case ImportedAddressValue:
-				return static_cast<uint64_t>(value.value);
-			default:
-				return std::nullopt;
-			}
-		}
-
-		std::optional<uint64_t> ConstantLikeValue(const RegisterValue& value)
-		{
-			switch (value.state)
-			{
-			case ConstantValue:
-			case ConstantPointerValue:
-			case ImportedAddressValue:
-				return static_cast<uint64_t>(value.value);
-			default:
-				return std::nullopt;
-			}
-		}
-
 		std::optional<MessageSendType> CallTargetType(BinaryView* bv, uint64_t callTarget)
 		{
 			auto symbol = bv->GetSymbolByAddress(callTarget);
@@ -93,33 +67,27 @@ namespace WorkflowObjC::Activities
 			return std::nullopt;
 		}
 
-		std::vector<LowLevelILInstruction> CallParamExprs(const LowLevelILInstruction& instr)
+		std::optional<Selector> SelectorFromCall(BinaryView* bv, LowLevelILFunction* ssa, const LowLevelILInstruction& instr)
 		{
 			std::vector<LowLevelILInstruction> params = instr.GetParameterExprs();
 			if (!params.empty() && params[0].operation == LLIL_SEPARATE_PARAM_LIST_SSA)
-				return params[0].GetParameterExprs<LLIL_SEPARATE_PARAM_LIST_SSA>();
-			return params;
-		}
-
-		std::optional<Selector> SelectorFromCall(BinaryView* bv, LowLevelILFunction* ssa, const LowLevelILInstruction& instr)
-		{
-			auto params = CallParamExprs(instr);
+				params = params[0].GetParameterExprs<LLIL_SEPARATE_PARAM_LIST_SSA>();
 			if (params.size() < 2 || params[1].operation != LLIL_REG_SSA)
 				return std::nullopt;
 
 			SSARegister selReg = params[1].GetSourceSSARegister<LLIL_REG_SSA>();
-			auto selectorValue = ConstantLikeValue(ssa->GetSSARegisterValue(selReg));
-			if (!selectorValue || *selectorValue == 0)
+			auto selectorValue = ssa->GetSSARegisterValue(selReg);
+			switch (selectorValue.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				if (selectorValue.value == 0)
+					return std::nullopt;
+				return Selector::FromAddress(bv, static_cast<uint64_t>(selectorValue.value));
+			default:
 				return std::nullopt;
-
-			return Selector::FromAddress(bv, *selectorValue);
-		}
-
-		Ref<Type> PointerToType(Architecture* arch, Ref<Type> type)
-		{
-			if (!type)
-				return nullptr;
-			return Type::PointerType(arch, type);
+			}
 		}
 
 		bool IsNamedType(Type* type, std::string_view name)
@@ -203,13 +171,15 @@ namespace WorkflowObjC::Activities
 				if (auto className = ObjCClassNameFromTypeEncoding(encoding))
 				{
 					if (auto classType = NamedType(bv, *className))
-						return PointerToType(arch, classType);
+						return Type::PointerType(arch, classType);
 				}
 
 				return NamedType(bv, "id");
 			}
 			case '#':
-				return PointerToType(arch, NamedType(bv, "objc_class_t"));
+				if (auto classType = NamedType(bv, "objc_class_t"))
+					return Type::PointerType(arch, classType);
+				return nullptr;
 			case ':':
 				return NamedType(bv, "SEL");
 			case '*':
@@ -379,15 +349,32 @@ namespace WorkflowObjC::Activities
 				return std::nullopt;
 
 			auto src = expr.GetSourceExpr<LLIL_LOAD_SSA>();
-			return ConstantLikeValue(src.GetPossibleValues());
+			auto value = src.GetPossibleValues();
+			switch (value.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				return static_cast<uint64_t>(value.value);
+			default:
+				return std::nullopt;
+			}
 		}
 
 		std::optional<uint64_t> CallTargetFromInstruction(
 		    LowLevelILFunction* ssa, const LowLevelILInstruction& instr)
 		{
 			auto dest = instr.GetDestExpr();
-			if (auto value = ConstantLikeValue(dest.GetPossibleValues()))
-				return value;
+			auto destValue = dest.GetPossibleValues();
+			switch (destValue.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				return static_cast<uint64_t>(destValue.value);
+			default:
+				break;
+			}
 
 			if (dest.operation != LLIL_REG_SSA)
 				return std::nullopt;
@@ -397,8 +384,16 @@ namespace WorkflowObjC::Activities
 				return std::nullopt;
 
 			auto src = def->GetSourceExpr<LLIL_SET_REG_SSA>();
-			if (auto value = ConstantLikeValue(src.GetPossibleValues()))
-				return value;
+			auto srcValue = src.GetPossibleValues();
+			switch (srcValue.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				return static_cast<uint64_t>(srcValue.value);
+			default:
+				break;
+			}
 
 			return ConstantLoadedPointer(src);
 		}
@@ -579,7 +574,9 @@ namespace WorkflowObjC::Activities
 			if (!targetSymbol || !IsAllocFunctionName(targetSymbol->GetRawName()))
 				return std::nullopt;
 
-			auto params = CallParamExprs(instr);
+			std::vector<LowLevelILInstruction> params = instr.GetParameterExprs();
+			if (!params.empty() && params[0].operation == LLIL_SEPARATE_PARAM_LIST_SSA)
+				params = params[0].GetParameterExprs<LLIL_SEPARATE_PARAM_LIST_SSA>();
 			if (params.empty())
 				return std::nullopt;
 
@@ -594,7 +591,17 @@ namespace WorkflowObjC::Activities
 		{
 			if (expr.operation == LLIL_CONST || expr.operation == LLIL_CONST_PTR)
 				return static_cast<uint64_t>(expr.GetConstant());
-			return ConstantLikeValue(expr.GetPossibleValues());
+
+			auto value = expr.GetPossibleValues();
+			switch (value.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				return static_cast<uint64_t>(value.value);
+			default:
+				return std::nullopt;
+			}
 		}
 
 		struct RegisterOffset
@@ -663,10 +670,17 @@ namespace WorkflowObjC::Activities
 		std::optional<ReceiverInfo> ReceiverInfoFromRegister(
 		    BinaryView* bv, Function* func, LowLevelILFunction* ssa, const SSARegister& reg, size_t depth)
 		{
-			if (auto classValue = ConstantLikeValue(ssa->GetSSARegisterValue(reg)))
+			auto regValue = ssa->GetSSARegisterValue(reg);
+			switch (regValue.state)
 			{
-				if (auto receiver = ReceiverInfoFromClassAddress(bv, *classValue))
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				if (auto receiver = ReceiverInfoFromClassAddress(bv, static_cast<uint64_t>(regValue.value)))
 					return receiver;
+				break;
+			default:
+				break;
 			}
 
 			auto def = SourceDefForRegister(ssa, reg);
@@ -702,10 +716,17 @@ namespace WorkflowObjC::Activities
 			if (auto receiver = ReceiverInfoFromIvarLoad(bv, func, ssa, src, depth + 1))
 				return receiver;
 
-			if (auto classValue = ConstantLikeValue(src.GetPossibleValues()))
+			auto srcValue = src.GetPossibleValues();
+			switch (srcValue.state)
 			{
-				if (auto receiver = ReceiverInfoFromClassAddress(bv, *classValue))
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				if (auto receiver = ReceiverInfoFromClassAddress(bv, static_cast<uint64_t>(srcValue.value)))
 					return receiver;
+				break;
+			default:
+				break;
 			}
 
 			if (auto classRef = ConstantLoadedPointer(src))
@@ -723,10 +744,17 @@ namespace WorkflowObjC::Activities
 			if (auto receiver = ReceiverInfoFromIvarLoad(bv, func, ssa, expr, depth + 1))
 				return receiver;
 
-			if (auto classValue = ConstantLikeValue(expr.GetPossibleValues()))
+			auto exprValue = expr.GetPossibleValues();
+			switch (exprValue.state)
 			{
-				if (auto receiver = ReceiverInfoFromClassAddress(bv, *classValue))
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				if (auto receiver = ReceiverInfoFromClassAddress(bv, static_cast<uint64_t>(exprValue.value)))
 					return receiver;
+				break;
+			default:
+				break;
 			}
 
 			if (auto classRef = ConstantLoadedPointer(expr))
@@ -741,7 +769,9 @@ namespace WorkflowObjC::Activities
 		std::optional<ReceiverInfo> ReceiverInfoFromCallReceiver(
 		    BinaryView* bv, Function* func, LowLevelILFunction* ssa, const LowLevelILInstruction& instr, size_t depth)
 		{
-			auto params = CallParamExprs(instr);
+			std::vector<LowLevelILInstruction> params = instr.GetParameterExprs();
+			if (!params.empty() && params[0].operation == LLIL_SEPARATE_PARAM_LIST_SSA)
+				params = params[0].GetParameterExprs<LLIL_SEPARATE_PARAM_LIST_SSA>();
 			if (params.empty())
 				return std::nullopt;
 
@@ -779,7 +809,9 @@ namespace WorkflowObjC::Activities
 			if (messageSendType != MessageSendType::Normal)
 				return nullptr;
 
-			auto params = CallParamExprs(instr);
+			std::vector<LowLevelILInstruction> params = instr.GetParameterExprs();
+			if (!params.empty() && params[0].operation == LLIL_SEPARATE_PARAM_LIST_SSA)
+				params = params[0].GetParameterExprs<LLIL_SEPARATE_PARAM_LIST_SSA>();
 			if (params.empty() || params[0].operation != LLIL_REG_SSA)
 				return nullptr;
 
@@ -787,24 +819,46 @@ namespace WorkflowObjC::Activities
 			if (!def || (def->operation != LLIL_CALL_SSA && def->operation != LLIL_TAILCALL_SSA))
 				return nullptr;
 
-			auto callTarget = ConstantLikeValue(def->GetDestExpr().GetPossibleValues());
-			if (!callTarget)
+			auto callTargetValue = def->GetDestExpr().GetPossibleValues();
+			uint64_t callTarget = 0;
+			switch (callTargetValue.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				callTarget = static_cast<uint64_t>(callTargetValue.value);
+				break;
+			default:
 				return nullptr;
+			}
 
-			auto targetSymbol = bv->GetSymbolByAddress(*callTarget);
+			auto targetSymbol = bv->GetSymbolByAddress(callTarget);
 			if (!targetSymbol || !IsAllocFunctionName(targetSymbol->GetRawName()))
 				return nullptr;
 
-			auto allocParams = CallParamExprs(*def);
+			std::vector<LowLevelILInstruction> allocParams = def->GetParameterExprs();
+			if (!allocParams.empty() && allocParams[0].operation == LLIL_SEPARATE_PARAM_LIST_SSA)
+				allocParams = allocParams[0].GetParameterExprs<LLIL_SEPARATE_PARAM_LIST_SSA>();
 			if (allocParams.empty() || allocParams[0].operation != LLIL_REG_SSA)
 				return nullptr;
 
-			auto classValue = ConstantLikeValue(
-			    ssa->GetSSARegisterValue(allocParams[0].GetSourceSSARegister<LLIL_REG_SSA>()));
-			if (!classValue || *classValue == 0)
+			auto classRegisterValue = ssa->GetSSARegisterValue(allocParams[0].GetSourceSSARegister<LLIL_REG_SSA>());
+			uint64_t classValue = 0;
+			switch (classRegisterValue.state)
+			{
+			case ConstantValue:
+			case ConstantPointerValue:
+			case ImportedAddressValue:
+				classValue = static_cast<uint64_t>(classRegisterValue.value);
+				break;
+			default:
+				return nullptr;
+			}
+
+			if (classValue == 0)
 				return nullptr;
 
-			auto classSymbol = bv->GetSymbolByAddress(*classValue);
+			auto classSymbol = bv->GetSymbolByAddress(classValue);
 			if (!classSymbol)
 				return nullptr;
 
