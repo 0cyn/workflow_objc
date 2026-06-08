@@ -38,14 +38,6 @@ extern "C"
 		}
 		WorkflowObjC::RegisterRenderLayers();
 
-		Settings::Instance()->RegisterSetting("analysis.objectiveC.resolveDynamicDispatch", R"({
-			"title" : "Resolve Dynamic Dispatch Calls",
-			"type" : "boolean",
-			"default" : true,
-			"aliases": ["core.function.objectiveC.assumeMessageSendTarget", "core.function.objectiveC.rewriteMessageSendTarget"],
-			"description" : "Replaces objc_msgSend calls with direct calls only when the receiver class is known and the matching target method can be resolved."
-		})");
-
 		return true;
 	}
 }

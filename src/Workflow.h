@@ -17,6 +17,8 @@ namespace WorkflowObjC
 	};
 
 	/// TODO: Fill in documentation.
+	void RegisterSettings();
+	/// TODO: Fill in documentation.
 	bool RegisterActivities();
 	/// TODO: Fill in documentation.
 	void RegisterRenderLayers();

@@ -453,11 +453,10 @@ namespace WorkflowObjC::Activities
 		return std::nullopt;
 	}
 
-	void ProcessObjCExterns(Ref<AnalysisContext> ac)
+	size_t MaterializePendingObjCExterns(BinaryView* view)
 	{
-		auto view = ac->GetBinaryView();
-		if (GlobalState::ShouldIgnoreView(view))
-			return;
+		if (!view || GlobalState::ShouldIgnoreView(view))
+			return 0;
 
 		auto requests = GlobalState::DrainObjCExternRequests(view);
 		auto functionsToReanalyze = MaterializeObjCExterns(view, requests);
@@ -466,6 +465,14 @@ namespace WorkflowObjC::Activities
 			for (auto& func : view->GetAnalysisFunctionsForAddress(functionStart))
 				func->MarkUpdatesRequired(FullAutoFunctionUpdate);
 		}
+
+		return functionsToReanalyze.size();
+	}
+
+	void ProcessObjCExterns(Ref<AnalysisContext> ac)
+	{
+		auto view = ac->GetBinaryView();
+		MaterializePendingObjCExterns(view);
 	}
 
 	void ProcessDiscoverTypedObjCExterns(Ref<AnalysisContext> ac)

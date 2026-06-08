@@ -37,8 +37,24 @@ namespace WorkflowObjC
 		};
 	}
 
+	void RegisterSettings()
+	{
+		static bool registered = [] {
+			Settings::Instance()->RegisterSetting("analysis.objectiveC.resolveDynamicDispatch", R"({
+				"title" : "Resolve Dynamic Dispatch Calls",
+				"type" : "boolean",
+				"default" : true,
+				"aliases": ["core.function.objectiveC.assumeMessageSendTarget", "core.function.objectiveC.rewriteMessageSendTarget"],
+				"description" : "Replaces objc_msgSend calls with direct calls only when the receiver class is known and the matching target method can be resolved."
+			})");
+			return true;
+		}();
+		(void)registered;
+	}
+
 	bool RegisterActivities()
 	{
+		RegisterSettings();
 		GlobalState::RegisterCleanup();
 
 		Ref<Workflow> baseWorkflow = Workflow::Get("core.function.metaAnalysis");
@@ -223,7 +239,6 @@ namespace WorkflowObjC
 			"title": "Obj-C: Materialize External Methods",
 			"description": "Create Objective-C external method symbols for typed message sends whose receiver class is not present in the current image",
 			"eligibility": {
-				"runOnce": true,
 				"auto": {},
 				"predicates": [
 					{

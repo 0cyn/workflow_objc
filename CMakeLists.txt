@@ -67,6 +67,20 @@ if(BUILD_TESTING)
     gtest_discover_tests(${PROJECT_NAME}_tests
         TEST_PREFIX workflow_objc.
         DISCOVERY_MODE PRE_TEST)
+
+    add_executable(${PROJECT_NAME}_corpus_tests
+        tests/CorpusTests.cpp
+        ${WORKFLOW_OBJC_TEST_SOURCES})
+    target_link_libraries(${PROJECT_NAME}_corpus_tests
+        ${PROJECT_NAME}_gtest
+        binaryninjaapi)
+    target_include_directories(${PROJECT_NAME}_corpus_tests PRIVATE src)
+    set_target_properties(${PROJECT_NAME}_corpus_tests PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON)
+    gtest_discover_tests(${PROJECT_NAME}_corpus_tests
+        TEST_PREFIX workflow_objc.corpus.
+        DISCOVERY_MODE PRE_TEST)
 endif()
 
 if(BN_INTERNAL_BUILD)
