@@ -68,12 +68,16 @@ It also call-rewrites to these externs and adds xrefs from call sites to the ext
 ### Known Issues
 
 * Variable names are occasionally less clear due to heavy IL mutation
+  * There is WIP code to auto-apply selector based names for variables you can enable in Settings
+    * This can be app-wide, per view, or per function
+* Extern code causes undesired behavior in Shared Caches
+  * Can be disabled in Open with Options.
 * It can be slower due to requiring repeat analysis of things.
 * BinaryNinja's built-in type libraries are not quite correct on objc methods returning class instances.
   * This plugin mitigates that issue currently, so this affects nothing
 * Not everything gets resolved yet
   * There are a million different ways we can get type information to a dispatch, it is a lot easier as a human to recognize 
-    propegatable type info than it is to programmatically do it. Expect this to improve over time. 
+    propegatable type info than it is to programmatically do it. Expect this to improve over time.
 
 ### Unknown issues 
 
