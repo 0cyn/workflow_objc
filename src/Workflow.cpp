@@ -205,6 +205,23 @@ namespace WorkflowObjC
 			}
 		})json", ActivityCallback(&Activities::ProcessRemoveMemoryManagement)));
 
+		workflow->RegisterActivity(new Activity(R"json({
+			"name": "core.function.objectiveC.nameVariables",
+			"role": "action",
+			"title": "Obj-C: Name Variables",
+			"description": "Apply Objective-C-aware auto names to generic variables.",
+			"eligibility": {
+				"auto": { "default": false },
+				"predicates": [
+					{
+						"type": "viewType",
+						"operator": "in",
+						"value": ["Mach-O", "DSCView"]
+					}
+				]
+			}
+		})json", ActivityCallback(&Activities::ProcessVariableNames)));
+
 		if (!workflow->InsertAfter("core.function.translateTailCalls", "core.function.objectiveC.inlineStubs"))
 			return false;
 		if (!workflow->InsertAfter("core.function.objectiveC.inlineStubs", "core.function.objectiveC.analyzeMessageSends"))
@@ -221,7 +238,8 @@ namespace WorkflowObjC
 			return false;
 		if (!workflow->InsertAfter("core.function.objectiveC.types.ivarGetter", "core.function.objectiveC.discoverTypedExterns"))
 			return false;
-
+		if (!workflow->Insert("core.function.generateHighLevelIL", "core.function.objectiveC.nameVariables"))
+			return false;
 		if (!Workflow::RegisterWorkflow(workflow))
 			return false;
 

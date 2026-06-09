@@ -264,13 +264,13 @@ namespace
 	bool IsGenericTemporary(std::string_view text)
 	{
 		return text == "obj" || text == "string" || text == "theString" || text == "oslog" ||
-		       text == "buf" || text == "entry_format" || text == "countByEnumeratingWithState" ||
-		       text == "objects" || text == "arg" || text == "log" || text == "format" ||
-		       text == "domain" || text == "errorWithDomain" || text == "UUIDBytes" || text == "bytes" ||
-		       text == "dataWithBytes" || text == "dataWithBytesNoCopy" || text == "exception_object" ||
-		       text == "into" || text == "addCodec" || text == "codecStruct" || text == "repeats" ||
-		       text == "yesOrNo" || text == "rep" || text == "i" ||
-		       IsRegisterTemporary(text);
+			   text == "buf" || text == "entry_format" || text == "countByEnumeratingWithState" ||
+			   text == "objects" || text == "arg" || text == "log" || text == "format" ||
+			   text == "domain" || text == "errorWithDomain" || text == "UUIDBytes" || text == "bytes" ||
+			   text == "dataWithBytes" || text == "dataWithBytesNoCopy" || text == "exception_object" ||
+			   text == "into" || text == "addCodec" || text == "codecStruct" || text == "repeats" ||
+			   text == "yesOrNo" || text == "rep" || text == "i" ||
+			   IsRegisterTemporary(text);
 	}
 
 	std::string NormalizeVariableToken(std::string_view text)
@@ -1259,6 +1259,7 @@ namespace
 		auto previousLocalObjCClassNames = gLocalObjCClassNames;
 		gLocalObjCClassNames = &localObjCClassNames;
 		auto functions = view->GetAnalysisFunctionList();
+
 		std::sort(functions.begin(), functions.end(), [](const auto& lhs, const auto& rhs) {
 			return std::tuple(lhs->GetStart(), ArchName(lhs->GetArchitecture()), FunctionName(lhs)) <
 			       std::tuple(rhs->GetStart(), ArchName(rhs->GetArchitecture()), FunctionName(rhs));
@@ -1294,6 +1295,24 @@ namespace
 		DumpDataVariables(stream, view);
 		DumpFunctions(stream, view);
 		return stream.str();
+	}
+
+	void MaterializeObjCExternFixedPoint(BinaryView* view);
+
+	std::string StableDumpView(BinaryView* view, const std::filesystem::path& binary)
+	{
+		std::string previous;
+		for (int pass = 0; pass < 16; ++pass)
+		{
+			auto current = DumpView(view, binary);
+			if (!previous.empty() && current == previous)
+				return current;
+
+			previous = std::move(current);
+			MaterializeObjCExternFixedPoint(view);
+		}
+
+		return DumpView(view, binary);
 	}
 
 	std::vector<std::string_view> SplitLines(std::string_view text)
@@ -1585,7 +1604,7 @@ namespace
 			if (analysis.state != IdleState || !analysis.activeInfo.empty())
 				continue;
 
-			CheckSnapshot(snapshotDir / SnapshotNameFor(loaded.view, binary), DumpView(loaded.view, binary));
+			CheckSnapshot(snapshotDir / SnapshotNameFor(loaded.view, binary), StableDumpView(loaded.view, binary));
 		}
 	}
 }

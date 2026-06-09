@@ -44,4 +44,6 @@ namespace WorkflowObjC::Activities
 	void ProcessSuperInit(BinaryNinja::Ref<BinaryNinja::AnalysisContext> ac);
 	/// TODO: Fill in documentation.
 	void ProcessRemoveMemoryManagement(BinaryNinja::Ref<BinaryNinja::AnalysisContext> ac);
+	/// TODO: Fill in documentation.
+	void ProcessVariableNames(BinaryNinja::Ref<BinaryNinja::AnalysisContext> ac);
 }

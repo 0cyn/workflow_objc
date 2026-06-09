@@ -195,6 +195,34 @@ namespace
 		return stream.str();
 	}
 
+	bool HasVariableNamed(BinaryNinja::Function* func, std::string_view name)
+	{
+		if (!func)
+			return false;
+
+		for (const auto& [var, info] : func->GetVariables())
+		{
+			(void)info;
+			if (func->GetVariableNameOrDefault(var) == name)
+				return true;
+		}
+
+		return false;
+	}
+
+	std::string VariableNameDiagnostics(BinaryNinja::BinaryView* view, BinaryNinja::Function* func)
+	{
+		std::ostringstream stream;
+		for (const auto& [var, info] : func->GetVariables())
+		{
+			(void)info;
+			auto type = func->GetVariableType(var);
+			stream << func->GetVariableNameOrDefault(var) << ":"
+			       << (type.IsUnknown() ? "<unknown>" : TypeString(view, type.GetValue())) << "\n";
+		}
+		return stream.str();
+	}
+
 	std::string HLILTextInRange(BinaryNinja::Function* func, uint64_t start, uint64_t end)
 	{
 		std::string result;
@@ -561,6 +589,7 @@ TEST_F(BinaryNinjaCoreTest, RegistersObjectiveCWorkflowActivities)
 	EXPECT_TRUE(workflow->Contains("core.function.objectiveC.types.retain"));
 	EXPECT_TRUE(workflow->Contains("core.function.objectiveC.types.superInit"));
 	EXPECT_TRUE(workflow->Contains("core.function.objectiveC.removeMemoryManagement"));
+	EXPECT_TRUE(workflow->Contains("core.function.objectiveC.nameVariables"));
 
 	auto subactivities = workflow->GetSubactivities("", false);
 	EXPECT_TRUE(ContainsAll(subactivities, {
@@ -572,7 +601,12 @@ TEST_F(BinaryNinjaCoreTest, RegistersObjectiveCWorkflowActivities)
 	    "core.function.objectiveC.types.retain",
 	    "core.function.objectiveC.types.superInit",
 	    "core.function.objectiveC.removeMemoryManagement",
+	    "core.function.objectiveC.nameVariables",
 	}));
+
+	auto moduleWorkflow = BinaryNinja::Workflow::Get("core.module.metaAnalysis");
+	ASSERT_TRUE(moduleWorkflow);
+	EXPECT_TRUE(moduleWorkflow->Contains("core.module.objectiveC.materializeExterns"));
 }
 
 TEST_F(BinaryNinjaCoreTest, NamedTypeImportsMissingTypeFromViewTypeLibrary)
@@ -783,6 +817,24 @@ TEST_F(BinaryNinjaCoreTest, CreatesObjCExternsForCalculatorExternalMessageSends)
 	EXPECT_EQ(fieldAccessText.find("+ 0xb0"), std::string::npos) << fieldAccessText;
 	EXPECT_EQ(fieldAccessText.find("+ 0xc0"), std::string::npos) << fieldAccessText;
 	EXPECT_NE(fieldAccessText.find("->"), std::string::npos) << fieldAccessText;
+
+	auto calculatorAwakeFromNibFunc = view->GetAnalysisFunction(view->GetDefaultPlatform(), 0x10000af50);
+	ASSERT_TRUE(calculatorAwakeFromNibFunc);
+	ASSERT_TRUE(calculatorAwakeFromNibFunc->GetHighLevelIL());
+	auto storedDefaultsFunc = view->GetAnalysisFunction(view->GetDefaultPlatform(), 0x10000b070);
+	ASSERT_TRUE(storedDefaultsFunc);
+	auto storedDefaultsText = HLILTextInRange(storedDefaultsFunc, 0x10000b0f0, 0x10000b120);
+	EXPECT_NE(storedDefaultsText.find("string_1"), std::string::npos) << storedDefaultsText;
+	auto awakeFromNibText = HLILTextInRange(calculatorAwakeFromNibFunc, 0x10000af50, 0x10000b06c);
+	for (std::string_view name : {"window", "notificationCenter", "application", "mainMenu"})
+	{
+		EXPECT_TRUE(HasVariableNamed(calculatorAwakeFromNibFunc, name))
+		    << name << "\n" << VariableNameDiagnostics(view, calculatorAwakeFromNibFunc);
+		std::string suffixedName = std::string(name) + "_1";
+		EXPECT_EQ(awakeFromNibText.find(suffixedName), std::string::npos) << awakeFromNibText;
+	}
+	EXPECT_FALSE(HasVariableNamed(calculatorAwakeFromNibFunc, "edge"))
+	    << VariableNameDiagnostics(view, calculatorAwakeFromNibFunc);
 
 	auto awakeFromNibFunc = view->GetAnalysisFunction(view->GetDefaultPlatform(), 0x100007b6c);
 	ASSERT_TRUE(awakeFromNibFunc);

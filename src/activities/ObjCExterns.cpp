@@ -376,7 +376,13 @@ namespace WorkflowObjC::Activities
 			auto resolution = ResolveMethodDispatch(bv, *info, key);
 			if (!resolution)
 				return false;
-			if (resolution->implAddress || resolution->externAddress || info->HasClass(bv, resolution->key.className))
+			if (resolution->externAddress)
+			{
+				GlobalState::AddObjCExternRequest(bv, resolution->key, function);
+				return true;
+			}
+
+			if (resolution->implAddress || info->HasClass(bv, resolution->key.className))
 				return false;
 
 			GlobalState::AddObjCExternRequest(bv, resolution->key, function);
@@ -399,7 +405,10 @@ namespace WorkflowObjC::Activities
 			{
 				const auto& request = entry.request;
 				if (ObjCExternMethodAddress(bv, request.key))
+				{
+					functionsToReanalyze.insert(request.functionStarts.begin(), request.functionStarts.end());
 					continue;
+				}
 
 				while (bv->GetSymbolByAddress(address))
 					address += slotSize;
